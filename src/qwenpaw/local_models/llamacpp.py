@@ -137,12 +137,16 @@ class LlamaCppBackend:
         if not self.check_llamacpp_installation()[0]:
             return False
         try:
-            return int(latest_version[1:]) > int(
-                (await self.get_version()),
-            )
+            latest_build = self._parse_llamacpp_build(latest_version)
+            if latest_build is None:
+                raise RuntimeError(
+                    f"Unparseable llama.cpp release tag: {latest_version}",
+                )
+            installed_build = await self.get_version()
+            return int(latest_build) > int(installed_build)
         except Exception as exc:
             logger.warning(f"Failed to check for llama.cpp updates: {exc}")
-            return True
+            return False
 
     def download(
         self,
@@ -342,20 +346,69 @@ class LlamaCppBackend:
             )
         except CommandExecutionError as exc:
             raise RuntimeError(str(exc)) from exc
-        lines = result.stderr_lines
-        prefix = "version:"
-        for line in lines:
-            if line.startswith(prefix):
-                # Output looks like "version: 8514 (406f4e3f6)"; take the
-                # first whitespace-delimited token instead of a fixed-width
-                # slice, which breaks once the build number is not 4 digits.
-                tokens = line.removeprefix(prefix).split()
-                if tokens:
-                    return tokens[0]
-        raise RuntimeError(
-            "Unexpected version output from llama.cpp server: "
-            f"{result.combined_output}",
-        )
+
+        # Use the first stderr "version:" line. Read stdout only when
+        # stderr has none, so an unparseable stderr line is not ignored.
+        build: str | None = None
+        for stream in (result.stderr_lines, result.stdout_lines):
+            version_line = next(
+                (line for line in stream if line.startswith("version:")),
+                None,
+            )
+            if version_line is None:
+                continue
+            build = self._parse_llamacpp_build(version_line)
+            break
+
+        if build is None:
+            raise RuntimeError(
+                "Unexpected version output from llama.cpp server: "
+                f"{result.combined_output}",
+            )
+        return build
+
+    @staticmethod
+    def _parse_llamacpp_build(version_text: str) -> str | None:
+        """Return the numeric llama.cpp build from a version line or tag.
+
+        The first token, with one pair of parentheses removed, is the build
+        when it is all digits or ``b``/``B`` plus digits, optionally
+        followed by ``-`` and a commit fragment. Otherwise a later token
+        that is exactly ``b``/``B`` plus digits is used. A commit hash is
+        not searched for an embedded build number.
+        """
+
+        def without_parentheses(token: str) -> str:
+            if (
+                len(token) >= 2
+                and token.startswith("(")
+                and token.endswith(")")
+            ):
+                return token[1:-1]
+            return token
+
+        text = version_text.strip().removeprefix("version:").strip()
+        tokens = text.split()
+        if not tokens:
+            return None
+
+        first = without_parentheses(tokens[0])
+        if first.isdigit():
+            return first
+        if len(first) >= 2 and first[0] in "bB":
+            digits = first[1:].split("-", 1)[0]
+            if digits.isdigit():
+                return digits
+
+        for token in tokens[1:]:
+            candidate = without_parentheses(token)
+            if (
+                len(candidate) >= 2
+                and candidate[0] in "bB"
+                and candidate[1:].isdigit()
+            ):
+                return candidate[1:]
+        return None
 
     def _is_download_active(self) -> bool:
         """Return whether the background download thread is active."""

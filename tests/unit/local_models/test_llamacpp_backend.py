@@ -411,6 +411,145 @@ built with AppleClang 15.0.0.15000309 for Darwin arm64""",
     )
 
     assert await downloader.get_version() == "8514"
+    assert await downloader.has_update("b8744") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected_version", "update_available"),
+    [
+        ("", "version: 10839 (d91b48d07)", "10839", False),
+        ("", "version: b10839 (d91b48d07)", "10839", False),
+        ("", "version: b10839-d91b48d07", "10839", False),
+        ("", "version: 0.4.0-dev (b10839)", "10839", False),
+        ("version: 0.4.0-dev (b10839)", "", "10839", False),
+        ("", "version: 8744 (hash)", "8744", False),
+        ("", "version: 8514 (d91b87440)", "8514", True),
+    ],
+)
+async def test_has_update_compares_parsed_llamacpp_build(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    stderr: str,
+    expected_version: str,
+    update_available: bool,
+) -> None:
+    downloader = _build_downloader(monkeypatch)
+
+    async def fake_run_command_async(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        del _kwargs
+        return CommandResult(
+            command=command,
+            returncode=0,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "check_llamacpp_installation",
+        lambda: (True, ""),
+    )
+    monkeypatch.setattr(
+        downloader_module,
+        "run_command_async",
+        fake_run_command_async,
+    )
+
+    assert await downloader.get_version() == expected_version
+    assert await downloader.has_update("b8744") is update_available
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "command_error"),
+    [
+        ("version: 8514 (406f4e3f6)", "version: 0.4.0-dev", False),
+        (
+            "built with AppleClang 15.0.0.15000309 for Darwin arm64",
+            "ggml_metal_device_init: ready",
+            False,
+        ),
+        ("", "", True),
+    ],
+)
+async def test_has_update_false_when_version_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    stderr: str,
+    command_error: bool,
+) -> None:
+    downloader = _build_downloader(monkeypatch)
+
+    async def fake_run_command_async(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        del _kwargs
+        if command_error:
+            raise CommandExecutionError(
+                command,
+                "boom",
+                returncode=1,
+                stderr="boom",
+            )
+        return CommandResult(
+            command=command,
+            returncode=0,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "check_llamacpp_installation",
+        lambda: (True, ""),
+    )
+    monkeypatch.setattr(
+        downloader_module,
+        "run_command_async",
+        fake_run_command_async,
+    )
+
+    assert await downloader.has_update("b8744") is False
+
+
+@pytest.mark.asyncio
+async def test_has_update_false_when_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = _build_downloader(monkeypatch)
+    calls: list[list[str]] = []
+
+    async def fake_run_command_async(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        del _kwargs
+        calls.append(command)
+        return CommandResult(
+            command=command,
+            returncode=0,
+            stdout="",
+            stderr="version: 8514 (406f4e3f6)",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "check_llamacpp_installation",
+        lambda: (False, "llama.cpp is not installed"),
+    )
+    monkeypatch.setattr(
+        downloader_module,
+        "run_command_async",
+        fake_run_command_async,
+    )
+
+    assert await downloader.has_update("b8744") is False
+    assert not calls
 
 
 @pytest.mark.asyncio
